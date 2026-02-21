@@ -1,6 +1,16 @@
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, PermissionsBitField } = require('discord.js');
+// Keep alive untuk Replit
+const http = require('http');
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Client is running!\n');
+}).listen(8080);
 
-const client = new Client({
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, PermissionsBitField, ActionRowBuilder, ButtonBuilder, ButtonStyle, ActivityType } = require('discord.js');
+const fs = require('fs').promises;
+const path = require('path');
+
+// ===== DUAL CLIENT SETUP =====
+const botClient = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
@@ -10,599 +20,1105 @@ const client = new Client({
     ]
 });
 
+const userClient = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMembers
+    ]
+});
+
 // ===== KONFIGURASI =====
 const TOKEN = process.env.DISCORD_TOKEN;
 const PORT = process.env.PORT || 3000;
 const CLIENT_ID = '1468634707658019072';
 
 // Channel IDs
-const GL_CHANNEL_ID = '1427420155738062922';  // Channel khusus GL
-const COMMAND_CHANNEL_ID = '1421007323475738738'; // Channel untuk command /gl
-const STICKY_CHANNEL_ID = '1413982358142718122';
+const GL_CHANNEL_ID = '1427420155738062922';
+const STATUS_CHANNEL_ID = '1469699989977432239';
+const SCRIPT_CHANNEL_ID = '1469939821337251981';
 
-// Admin Role IDs
-const ADMIN_ROLES = [
-    '1421010720304402443', // Role admin 1
-    '1424421572520706169'  // Role admin 2
+// Role IDs untuk admin
+const ADMIN_COMMAND_ROLES = [
+    '1421010720304402443',
+    '1424421572520706169'
 ];
 
-// Variabel untuk sticky note
-let stickyMessageId = null;
-let isUpdatingSticky = false; // Flag untuk mencegah infinite loop
-let stickyUpdateTimeout = null; // Untuk debounce
-let isBotDeletingSticky = false; // Flag untuk track jika bot yang menghapus
+// ID untuk user khusus
+const BOT_CREATOR_ID = '929200608190300212'; // @mi._chel
+const SPECIAL_USER_ID = '914818330022535209'; // User khusus untuk auto-reply 1
 
-// Default GL Link (bisa diubah via command)
-let GL_LINK = 'https://cdn.discordapp.com/attachments/901662125091606598/1451194928775303218/GrowLauncher_v6.1.45.apk?ex=69849218&is=69834098&hm=269c887a008fb523981bab81e3c8afaedb25d3d0f6ec01fa1c0dc45af581d6a8&';
+// Auto-reply messages untuk tag user 914818330022535209
+const USER1_AUTO_REPLY = [
+    "lagi maen ama pacarnya",
+    "si eja lagi nonton youtube keknya",
+    "si zax gatau kemana jir",
+    `biasanya tidur si eza`
+];
 
-// ===== FITUR ANTI TAG =====
-let antiTagEnabled = false; // Fitur anti-tag default mati
-const tagWarnings = new Map(); // { userId: { count: number, lastWarning: Date } }
-const MAX_WARNINGS = 3; // Maksimal peringatan sebelum mute
-const MUTE_DURATION = 10; // Durasi mute dalam detik
-// =======================
+// Auto-reply messages anime untuk tag/reply bot
+const ANIME_AUTO_REPLY = [
+    "Omae wa nani no tame ni umaretekita no?",
+    "Omae wa kyou de shinu no yo. Jigoku ni ochiro.",
+    "Shinobu-sama to, tsuishin shite... moshikashitara, watashi... tanjiru no miteru dake ka mo.",
+    "Kanjou ga, nai...",
+    "Me ga samete, yokatta...",
+    "Nage kettei."
+];
 
-// Slash Commands Definitions
+// ===== VARIABEL STATUS =====
+let botStartTime = null;
+let statusMessageId = '1469726250854518906';
+let commandCount = 0;
+let lastCommandCount = 0;
+let lastStatusUpdate = 0;
+let botStartTimeFormatted = 'N/A';
+const STATUS_UPDATE_INTERVAL = 60000;
+
+// ===== SISTEM BLOK SPAM =====
+const blockedUsers = new Map();
+const BLOCK_DURATION = 10000;
+const SPAM_COMMAND_THRESHOLD = 8;
+const SPAM_TIME_WINDOW = 10000;
+const userCommandHistory = new Map();
+
+// ===== SISTEM AUTO-REPLY KHUSUS =====
+let autoReplyUser1 = true;
+let autoReplyUser2 = true;
+const lastReplyTime = new Map();
+const REPLY_COOLDOWN = 300000;
+
+// ===== SISTEM TIMEOUT UNTUK USER 2 =====
+const user2TagWarnings = new Map();
+const TIMEOUT_DURATION = 3600000;
+
+// ===== FUNGSI BANTUAN =====
+function getUser1AutoReply() {
+    return USER1_AUTO_REPLY[Math.floor(Math.random() * USER1_AUTO_REPLY.length)];
+}
+
+function getAnimeAutoReply() {
+    return ANIME_AUTO_REPLY[Math.floor(Math.random() * ANIME_AUTO_REPLY.length)];
+}
+
+async function getFooterWithAvatar(userTag) {
+    try {
+        const creator = await botClient.users.fetch(BOT_CREATOR_ID);
+        return { 
+            text: `Bot by ${creator.tag} • Requested by ${userTag}`,
+            iconURL: creator.displayAvatarURL({ extension: 'png', size: 64 })
+        };
+    } catch (error) {
+        return { 
+            text: `Bot by @mi._chel • Requested by ${userTag}`
+        };
+    }
+}
+
+async function getGeneralFooter() {
+    try {
+        const creator = await botClient.users.fetch(BOT_CREATOR_ID);
+        return { 
+            text: `Bot by ${creator.tag}`,
+            iconURL: creator.displayAvatarURL({ extension: 'png', size: 64 })
+        };
+    } catch (error) {
+        return { 
+            text: `Bot by @mi._chel`
+        };
+    }
+}
+
+function formatUptime() {
+    if (!botStartTime) return 'N/A';
+
+    const now = Date.now();
+    const uptime = now - botStartTime;
+
+    const seconds = Math.floor((uptime / 1000) % 60);
+    const minutes = Math.floor((uptime / (1000 * 60)) % 60);
+    const hours = Math.floor((uptime / (1000 * 60 * 60)) % 24);
+    const days = Math.floor(uptime / (1000 * 60 * 60 * 24));
+
+    const parts = [];
+    if (days > 0) parts.push(`${days}d`);
+    if (hours > 0) parts.push(`${hours}h`);
+    if (minutes > 0) parts.push(`${minutes}m`);
+    parts.push(`${seconds}s`);
+
+    return parts.join(' ');
+}
+
+function formatDateWIB() {
+    const now = new Date();
+    const wibOffset = 7 * 60 * 60 * 1000;
+    const wibTime = new Date(now.getTime() + wibOffset);
+
+    const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+    const months = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+
+    const dayName = days[wibTime.getUTCDay()];
+    const date = wibTime.getUTCDate();
+    const month = months[wibTime.getUTCMonth()];
+    const year = wibTime.getUTCFullYear();
+
+    const hours = wibTime.getUTCHours().toString().padStart(2, '0');
+    const minutes = wibTime.getUTCMinutes().toString().padStart(2, '0');
+    const seconds = wibTime.getUTCSeconds().toString().padStart(2, '0');
+
+    return `${dayName}, ${date} ${month} ${year} | ${hours}:${minutes}:${seconds} WIB`;
+}
+
+function isUserBlocked(userId) {
+    const blockData = blockedUsers.get(userId);
+    if (!blockData) return false;
+
+    if (Date.now() >= blockData.blockUntil) {
+        blockedUsers.delete(userId);
+        return false;
+    }
+
+    return true;
+}
+
+function blockUser(userId, reason = 'Spamming commands') {
+    const blockUntil = Date.now() + BLOCK_DURATION;
+    blockedUsers.set(userId, {
+        blockUntil,
+        reason,
+        blockedAt: Date.now()
+    });
+
+    setTimeout(() => {
+        blockedUsers.delete(userId);
+    }, BLOCK_DURATION);
+
+    console.log(`⛔ User ${userId} blocked`);
+}
+
+function checkCommandSpam(userId) {
+    const now = Date.now();
+    let userData = userCommandHistory.get(userId);
+
+    if (!userData) {
+        userData = { timestamps: [now], count: 1 };
+        userCommandHistory.set(userId, userData);
+        return false;
+    }
+
+    userData.timestamps = userData.timestamps.filter(time => now - time < SPAM_TIME_WINDOW);
+    userData.timestamps.push(now);
+    userData.count = userData.timestamps.length;
+
+    if (userData.count >= SPAM_COMMAND_THRESHOLD) {
+        blockUser(userId, `Spamming commands (${userData.count} commands in 10 seconds)`);
+        userCommandHistory.delete(userId);
+        return true;
+    }
+
+    userCommandHistory.set(userId, userData);
+    return false;
+}
+
+function canReplyToUser1(userId) {
+    const lastTime = lastReplyTime.get(userId);
+    if (!lastTime) return true;
+
+    const now = Date.now();
+    return (now - lastTime) >= REPLY_COOLDOWN;
+}
+
+function updateLastReplyTime(userId) {
+    lastReplyTime.set(userId, Date.now());
+}
+
+async function timeoutUser(member, duration = TIMEOUT_DURATION, reason = 'Tagging user 2 twice') {
+    try {
+        await member.timeout(duration, reason);
+        return true;
+    } catch (error) {
+        console.error('Error timing out user:', error);
+        return false;
+    }
+}
+
+async function handleUser2Tag(message) {
+    if (!isRegularMember(message.member)) {
+        return;
+    }
+
+    const userId = message.author.id;
+    const now = Date.now();
+
+    if (message.member.communicationDisabledUntil && message.member.communicationDisabledUntil > new Date()) {
+        return;
+    }
+
+    let warningData = user2TagWarnings.get(userId);
+
+    if (!warningData) {
+        warningData = { count: 1, lastWarning: now };
+        user2TagWarnings.set(userId, warningData);
+
+        try {
+            await message.channel.send({
+                content: `⚠️ **PERINGATAN!** <@${userId}>\nAnda telah men-tag <@${BOT_CREATOR_ID}>. Jika men-tag lagi, Anda akan di-timeout selama 1 jam!`
+            });
+        } catch (error) {}
+        return;
+    }
+
+    if (now - warningData.lastWarning > 3600000) {
+        warningData = { count: 1, lastWarning: now };
+        user2TagWarnings.set(userId, warningData);
+
+        try {
+            await message.channel.send({
+                content: `⚠️ **PERINGATAN!** <@${userId}>\nAnda telah men-tag <@${BOT_CREATOR_ID}>. Jika men-tag lagi, Anda akan di-timeout selama 1 jam!`
+            });
+        } catch (error) {}
+        return;
+    }
+
+    warningData.count = 2;
+    warningData.lastWarning = now;
+
+    try {
+        const timeoutSuccess = await timeoutUser(message.member, TIMEOUT_DURATION, `Tagging user ${BOT_CREATOR_ID} twice within 1 hour`);
+
+        if (timeoutSuccess) {
+            const timeoutUntil = new Date(now + TIMEOUT_DURATION);
+            await message.channel.send({
+                content: `⛔ **TIMEOUT!** <@${userId}>\nAnda telah di-timeout selama 1 jam karena men-tag <@${BOT_CREATOR_ID}> dua kali dalam waktu singkat.\nTimeout akan berakhir: <t:${Math.floor(timeoutUntil.getTime() / 1000)}:R>`
+            });
+        }
+        user2TagWarnings.delete(userId);
+    } catch (error) {}
+}
+
+function isRegularMember(member) {
+    if (!member) return false;
+
+    if (member.roles.cache.some(role => ADMIN_COMMAND_ROLES.includes(role.id))) {
+        return false;
+    }
+
+    if (member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        return false;
+    }
+
+    if (member.id === member.guild.ownerId) {
+        return false;
+    }
+
+    return true;
+}
+
+async function updateStatusEmbed() {
+    try {
+        const channel = botClient.channels.cache.get(STATUS_CHANNEL_ID);
+        if (!channel) return;
+
+        const creator = await botClient.users.fetch(BOT_CREATOR_ID);
+
+        lastCommandCount = commandCount;
+
+        const row = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId('status_check_commands')
+                    .setLabel('📊 Check Commands')
+                    .setStyle(ButtonStyle.Secondary)
+            );
+
+        const embed = new EmbedBuilder()
+            .setColor(0x00FF00)
+            .setTitle('🤖 Michelle Bot Status')
+            .setDescription('**Status informasi bot real-time**')
+            .addFields(
+                { name: '🔄 Status', value: '🟢 **ONLINE**', inline: true },
+                { name: '📊 Commands Used', value: `**${lastCommandCount}** commands`, inline: true },
+                { name: '⏰ Online Since', value: botStartTimeFormatted, inline: false },
+                { name: '⏱️ Uptime', value: formatUptime(), inline: true }
+            )
+            .setFooter({ 
+                text: `Bot by ${creator.tag}`,
+                iconURL: creator.displayAvatarURL({ extension: 'png', size: 64 })
+            })
+            .setTimestamp();
+
+        try {
+            const message = await channel.messages.fetch(statusMessageId);
+            await message.edit({ 
+                embeds: [embed],
+                components: [row]
+            });
+        } catch (error) {
+            const message = await channel.send({ 
+                embeds: [embed],
+                components: [row]
+            });
+            statusMessageId = message.id;
+        }
+    } catch (error) {}
+}
+
+let GL_LINK = 'https://www.mediafire.com/file/kpwtpyf11hlo5m6/GrowLauncher_v6.1.45.apk/file';
+
 const commands = [
-    // User Commands
     new SlashCommandBuilder()
         .setName('gl')
         .setDescription('Dapatkan link download GrowLauncher'),
-    
-    // Admin Commands (hanya setlink dan toggle anti-tag)
-    new SlashCommandBuilder()
-        .setName('admin')
-        .setDescription('Command untuk admin')
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('setlink')
-                .setDescription('Set link GrowLauncher baru')
-                .addStringOption(option =>
-                    option.setName('link')
-                        .setDescription('Link baru untuk GrowLauncher')
-                        .setRequired(true)))
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('antitag')
-                .setDescription('Toggle fitur anti-tag admin')
-                .addStringOption(option =>
-                    option.setName('status')
-                        .setDescription('ON atau OFF')
-                        .setRequired(true)
-                        .addChoices(
-                            { name: 'ON', value: 'on' },
-                            { name: 'OFF', value: 'off' }
-                        ))),
-    
+
     new SlashCommandBuilder()
         .setName('help')
-        .setDescription('Tampilkan semua command yang tersedia')
+        .setDescription('Tampilkan semua command yang tersedia untuk user'),
+
+    new SlashCommandBuilder()
+        .setName('autoreply1')
+        .setDescription('Toggle auto-reply untuk user 914818330022535209')
+        .addStringOption(option =>
+            option.setName('status')
+                .setDescription('ON atau OFF')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'ON', value: 'on' },
+                    { name: 'OFF', value: 'off' }
+                )),
+
+    new SlashCommandBuilder()
+        .setName('autoreply2')
+        .setDescription('Toggle auto-reply untuk user 929200608190300212')
+        .addStringOption(option =>
+            option.setName('status')
+                .setDescription('ON atau OFF')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'ON', value: 'on' },
+                    { name: 'OFF', value: 'off' }
+                )),
+
+    new SlashCommandBuilder()
+        .setName('docsgpai')
+        .setDescription('Dokumentasi GrowPai Lua'),
+
+    new SlashCommandBuilder()
+        .setName('docsbhax')
+        .setDescription('Dokumentasi Bothax'),
+
+    new SlashCommandBuilder()
+        .setName('docsgenta')
+        .setDescription('Dokumentasi Genta Hax'),
+
+    new SlashCommandBuilder()
+        .setName('docsgl')
+        .setDescription('Dokumentasi GrowLauncher'),
+
+    new SlashCommandBuilder()
+        .setName('growpai')
+        .setDescription('Download GrowPai'),
+
+    new SlashCommandBuilder()
+        .setName('bothax')
+        .setDescription('Download Bothax'),
+
+    new SlashCommandBuilder()
+        .setName('genta')
+        .setDescription('Download Genta Hax'),
+
+    new SlashCommandBuilder()
+        .setName('loader')
+        .setDescription('Download Loader untuk injector Windows'),
+
+    new SlashCommandBuilder()
+        .setName('broadcast')
+        .setDescription('Kirim pesan ke channel tertentu (Admin only)')
+        .addChannelOption(option =>
+            option.setName('channel')
+                .setDescription('Channel tujuan')
+                .setRequired(true)
+                .addChannelTypes(0)
+        )
+        .addStringOption(option =>
+            option.setName('message')
+                .setDescription('Pesan yang akan dikirim')
+                .setRequired(true)
+        )
+        .addBooleanOption(option =>
+            option.setName('embed')
+                .setDescription('Kirim sebagai embed?')
+                .setRequired(false)
+        )
 ];
 
-// Register Slash Commands
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 async function registerCommands() {
     try {
-        console.log('🔄 Mendaftarkan slash commands...');
-        await rest.put(
+        console.log('🔄 Registering commands...');
+
+        const commandNames = commands.map(cmd => cmd.name);
+        const uniqueNames = [...new Set(commandNames)];
+
+        if (commandNames.length !== uniqueNames.length) {
+            console.error('❌ Ada duplicate command names!');
+            return false;
+        }
+
+        const data = await rest.put(
             Routes.applicationCommands(CLIENT_ID),
             { body: commands.map(cmd => cmd.toJSON()) }
         );
-        console.log('✅ Slash commands terdaftar!');
+        console.log(`✅ Registered ${data.length} commands:`);
+        data.forEach(cmd => console.log(`  - /${cmd.name}`));
+        return true;
     } catch (error) {
-        console.error('❌ Gagal mendaftarkan commands:', error);
+        console.error('❌ Error registering commands:', error.message);
+        return false;
     }
 }
 
-// Helper: Cek apakah user adalah admin
 function isAdmin(member) {
     if (!member) return false;
-    
-    // Cek jika user punya role admin
     const hasAdminRole = member.roles.cache.some(role => 
-        ADMIN_ROLES.includes(role.id)
+        ADMIN_COMMAND_ROLES.includes(role.id)
     );
-    
-    // Cek jika user adalah server owner atau administrator
     const hasAdminPerm = member.permissions.has(PermissionsBitField.Flags.Administrator);
-    
     return hasAdminRole || hasAdminPerm || member.id === member.guild.ownerId;
 }
 
-// Helper: Cek apakah user memiliki role admin
-function hasAdminRole(user) {
-    return ADMIN_ROLES.some(roleId => user.roles.cache.has(roleId));
-}
+function checkChannel(interaction, allowedChannelId, commandName) {
+    if (interaction.channel.id !== allowedChannelId) {
+        const embed = new EmbedBuilder()
+            .setColor(0xFF0000)
+            .setTitle('❌ Wrong Channel!')
+            .setDescription(`Command **/${commandName}** can only be used in <#${allowedChannelId}>`)
+            .addFields(
+                { name: 'Correct Channel', value: `<#${allowedChannelId}>`, inline: true },
+                { name: 'Current Channel', value: `<#${interaction.channel.id}>`, inline: true }
+            )
+            .setFooter({ text: 'Bot by @mi._chel' })
+            .setTimestamp();
 
-// Helper: Mute member
-async function muteMember(member, durationSeconds) {
-    try {
-        await member.timeout(durationSeconds * 1000, 'Terlalu banyak tag admin');
-        console.log(`🔇 Muted ${member.user.tag} for ${durationSeconds} seconds`);
-    } catch (error) {
-        console.error('Gagal mute member:', error);
-    }
-}
-
-// ===== FUNGSI STICKY NOTE =====
-async function postStickyMessage() {
-    // Jika sedang proses update, skip
-    if (isUpdatingSticky) {
-        console.log('📌 Skipping sticky update - already in progress');
+        interaction.reply({ embeds: [embed], ephemeral: true });
         return false;
     }
-    
-    isUpdatingSticky = true;
-    isBotDeletingSticky = true; // Tandai bahwa bot akan menghapus
-    
-    try {
-        const channel = client.channels.cache.get(STICKY_CHANNEL_ID);
-        if (!channel) {
-            console.log('❌ Sticky channel not found');
-            isUpdatingSticky = false;
-            isBotDeletingSticky = false;
-            return false;
-        }
-        
-        // Hapus message lama jika ada
-        if (stickyMessageId) {
-            try {
-                const oldMessage = await channel.messages.fetch(stickyMessageId);
-                // Cek apakah oldMessage adalah milik bot kita
-                if (oldMessage.author.id === client.user.id) {
-                    await oldMessage.delete();
-                    console.log(`📌 Deleted old sticky message (ID: ${stickyMessageId})`);
-                } else {
-                    console.log(`📌 Old message is not from bot, skipping delete`);
-                }
-            } catch (error) {
-                // Message mungkin sudah dihapus
-                if (error.code === 10008) { // Unknown Message
-                    console.log('📌 Old sticky message already deleted');
-                } else {
-                    console.log(`📌 Error deleting old sticky: ${error.message}`);
-                }
+    return true;
+}
+
+async function createCheckCommandsEmbed(userTag) {
+    const embed = new EmbedBuilder()
+        .setColor(0x7289DA)
+        .setTitle('📚 All Available Commands')
+        .setDescription('**Daftar semua command yang tersedia di Michelle Bot:**')
+        .addFields(
+            { 
+                name: '🎮 **Download Commands**', 
+                value: [
+                    '`/gl` - Download GrowLauncher',
+                    '`/growpai` - Download GrowPai',
+                    '`/bothax` - Download Bothax',
+                    '`/genta` - Download Genta Hax',
+                    '`/loader` - Download Loader untuk injector Windows'
+                ].join('\n'),
+                inline: false
+            },
+            { 
+                name: '📖 **Documentation Commands**', 
+                value: [
+                    '`/docsgpai` - Dokumentasi GrowPai Lua',
+                    '`/docsbhax` - Dokumentasi Bothax',
+                    '`/docsgenta` - Dokumentasi Genta Hax',
+                    '`/docsgl` - Dokumentasi GrowLauncher'
+                ].join('\n'),
+                inline: false
             }
-        }
-        
-        // Kirim message baru
-        const stickyContent = "📌 **Sticky Note**\nGrowlauncher at <#1427420155738062922> and type `/gl`";
-        const message = await channel.send(stickyContent);
-        stickyMessageId = message.id;
-        
-        console.log(`📌 New sticky note posted in #${channel.name} (ID: ${message.id})`);
-        return true;
-        
-    } catch (error) {
-        console.error('❌ Error posting sticky:', error.message);
-        return false;
-    } finally {
-        // Reset flag setelah selesai
-        setTimeout(() => {
-            isUpdatingSticky = false;
-            isBotDeletingSticky = false;
-        }, 1000);
-    }
-}
-// =============================
+        )
+        .setFooter(await getFooterWithAvatar(userTag))
+        .setTimestamp();
 
-// Bot Ready
-client.once('ready', async () => {
-    console.log('='.repeat(50));
-    console.log(`🤖 ${client.user.tag} sudah online!`);
-    console.log(`📌 Bot ID: ${client.user.id}`);
-    console.log(`🎯 GL Channel: ${GL_CHANNEL_ID}`);
-    console.log(`🎯 Command Channel: ${COMMAND_CHANNEL_ID}`);
-    console.log(`📌 Sticky Channel: ${STICKY_CHANNEL_ID}`);
-    console.log(`👑 Admin Roles: ${ADMIN_ROLES.join(', ')}`);
-    console.log(`🛡️ Anti-Tag Feature: ${antiTagEnabled ? 'ON' : 'OFF'}`);
-    console.log('='.repeat(50));
-    
-    // Cek apakah semua channel ada
-    const glChannel = client.channels.cache.get(GL_CHANNEL_ID);
-    const stickyChannel = client.channels.cache.get(STICKY_CHANNEL_ID);
-    
-    if (!glChannel) console.log('⚠️  GL Channel not found!');
-    if (!stickyChannel) console.log('⚠️  Sticky Channel not found!');
-    
+    return embed;
+}
+
+// ===== BOT CLIENT EVENTS =====
+botClient.once('ready', async () => {
+    console.log(`🤖 ${botClient.user.tag} is online!`);
+    botStartTime = Date.now();
+    botStartTimeFormatted = formatDateWIB();
+
     await registerCommands();
-    
-    // Set status
-    client.user.setPresence({
-        activities: [{ name: 'Helper Server ZaXploit', type: 0 }],
-        status: 'Do Not Disturb'
+
+    botClient.user.setPresence({
+        activities: [{ name: '⠀', type: ActivityType.Custom }],
+        status: 'dnd'
     });
-    
-    // Post sticky note setelah bot ready (tunggu 3 detik)
-    setTimeout(() => {
-        if (stickyChannel) {
-            postStickyMessage();
-        } else {
-            console.log('❌ Cannot post sticky note - channel not found');
-        }
-    }, 3000);
+
+    setInterval(() => {
+        updateStatusEmbed();
+        lastStatusUpdate = Date.now();
+    }, STATUS_UPDATE_INTERVAL);
+
+    await updateStatusEmbed();
+    lastStatusUpdate = Date.now();
+
+    console.log('✅ Bot ready!');
 });
 
-// Handle Slash Commands
-client.on('interactionCreate', async interaction => {
-    if (!interaction.isCommand()) return;
-    
-    const { commandName, options, channel, member } = interaction;
-    
-    // Log command usage
-    console.log(`[${new Date().toLocaleTimeString()}] ${interaction.user.tag} used /${commandName} in #${channel.name}`);
-    
-    // ===== COMMAND: /gl =====
-    if (commandName === 'gl') {
-        // Cek apakah di channel yang benar
-        if (channel.id !== GL_CHANNEL_ID) {
-            const embed = new EmbedBuilder()
-                .setColor(0xFF0000)
-                .setTitle('❌ Channel Salah!')
-                .setDescription(`Command **/gl** hanya bisa digunakan di <#${GL_CHANNEL_ID}>`)
-                .addFields(
-                    { name: 'Channel yang Benar', value: `<#${GL_CHANNEL_ID}>`, inline: true },
-                    { name: 'Channel Sekarang', value: `<#${channel.id}>`, inline: true }
-                )
-                .setFooter({ text: 'Pindah ke channel yang benar untuk menggunakan command ini' })
-                .setTimestamp();
-            
-            return interaction.reply({ embeds: [embed], ephemeral: true });
-        }
-        
-        // Kirim embed dengan link
-        const embed = new EmbedBuilder()
-            .setColor(0x00FF00)
-            .setTitle('🎮 GrowLauncher v6.1.45')
-            .setDescription('**Link download GrowLauncher terbaru:**')
-            .addFields(
-                { name: '📥 Direct Download', value: `[Download Disini](${GL_LINK})`, inline: true },
-                { name: '📁 File Size', value: '~150 MB', inline: true },
-                { name: '🔄 Version', value: 'v6.1.45', inline: true },
-                { name: '⚠️ Important', value: 'Matikan antivirus sebelum install!', inline: false }
-            )
-            .setImage('https://cdn.discordapp.com/attachments/901662125091606598/1451194928775303218/GrowLauncher_v6.1.45.apk?ex=69849218&is=69834098&hm=269c887a008fb523981bab81e3c8afaedb25d3d0f6ec01fa1c0dc45af581d6a8&')
-            .setFooter({ text: `Requested by ${interaction.user.tag}`, iconURL: interaction.user.displayAvatarURL() })
-            .setTimestamp();
-        
-        await interaction.reply({ embeds: [embed] });
-    }
-    
-    // ===== COMMAND: /admin ===== (Hanya untuk admin)
-    else if (commandName === 'admin') {
-        // Cek apakah user adalah admin
-        if (!isAdmin(member)) {
-            const embed = new EmbedBuilder()
-                .setColor(0xFF0000)
-                .setTitle('❌ Akses Ditolak!')
-                .setDescription('Anda tidak memiliki permission untuk menggunakan command admin.')
-                .addFields(
-                    { name: 'Required Roles', value: ADMIN_ROLES.map(id => `<@&${id}>`).join(', ') },
-                    { name: 'Your Roles', value: member.roles.cache.map(r => r.name).join(', ') || 'None' }
-                )
-                .setTimestamp();
-            
-            return interaction.reply({ embeds: [embed], ephemeral: true });
-        }
-        
-        const subcommand = options.getSubcommand();
-        
-        // Subcommand: setlink
-        if (subcommand === 'setlink') {
-            const newLink = options.getString('link');
-            
-            // Validasi link
-            if (!newLink.startsWith('http')) {
-                return interaction.reply({ 
-                    content: '❌ Link harus dimulai dengan http:// atau https://', 
-                    ephemeral: true 
-                });
-            }
-            
-            // Simpan link lama untuk log
-            const oldLink = GL_LINK;
-            GL_LINK = newLink;
-            
-            const embed = new EmbedBuilder()
-                .setColor(0x00FF00)
-                .setTitle('✅ Link Diperbarui!')
-                .setDescription('Link GrowLauncher berhasil diupdate.')
-                .addFields(
-                    { name: 'Link Lama', value: `[Klik disini](${oldLink})`, inline: false },
-                    { name: 'Link Baru', value: `[Klik disini](${newLink})`, inline: false },
-                    { name: 'Updated By', value: interaction.user.tag, inline: true },
-                    { name: 'Time', value: new Date().toLocaleString(), inline: true }
-                )
-                .setFooter({ text: 'Link akan otomatis digunakan untuk command /gl' })
-                .setTimestamp();
-            
-            await interaction.reply({ embeds: [embed], ephemeral: true });
-            
-            // Log ke console
-            console.log(`🔗 Link updated by ${interaction.user.tag}`);
-            console.log(`Old: ${oldLink.substring(0, 50)}...`);
-            console.log(`New: ${newLink.substring(0, 50)}...`);
-        }
-        
-        // Subcommand: antitag
-        else if (subcommand === 'antitag') {
-            const status = options.getString('status');
-            
-            if (status === 'on') {
-                antiTagEnabled = true;
-                // Clear existing warnings saat fitur diaktifkan
-                tagWarnings.clear();
-                
-                const embed = new EmbedBuilder()
-                    .setColor(0x00FF00)
-                    .setTitle('✅ Fitur Anti-Tag Diaktifkan!')
-                    .setDescription('Fitur anti-tag admin sekarang AKTIF.')
-                    .addFields(
-                        { name: 'Status', value: '🟢 **ON**', inline: true },
-                        { name: 'Max Warnings', value: `${MAX_WARNINGS}x`, inline: true },
-                        { name: 'Mute Duration', value: `${MUTE_DURATION} detik`, inline: true },
-                        { name: 'Dibuat oleh', value: interaction.user.tag, inline: false }
-                    )
-                    .setFooter({ text: 'Member yang tag admin akan mendapat peringatan' })
-                    .setTimestamp();
-                
-                await interaction.reply({ embeds: [embed], ephemeral: true });
-                console.log(`🛡️ Anti-tag feature ENABLED by ${interaction.user.tag}`);
-                
-                // Kirim pesan status ke COMMAND_CHANNEL_ID
-                try {
-                    const commandChannel = client.channels.cache.get(COMMAND_CHANNEL_ID);
-                    if (commandChannel) {
-                        await commandChannel.send({
-                            content: `🛡️ **Status Anti-Tag:** **AKTIF**\nFitur anti-tag admin telah diaktifkan oleh @${interaction.user.tag}`
-                        });
-                    }
-                } catch (error) {
-                    console.error('Gagal kirim status anti-tag:', error);
-                }
-                
-            } else {
-                antiTagEnabled = false;
-                // Clear warnings saat fitur dimatikan
-                tagWarnings.clear();
-                
-                const embed = new EmbedBuilder()
-                    .setColor(0xFFA500)
-                    .setTitle('⏸️ Fitur Anti-Tag Dimatikan!')
-                    .setDescription('Fitur anti-tag admin sekarang NON-AKTIF.')
-                    .addFields(
-                        { name: 'Status', value: '🔴 **OFF**', inline: true },
-                        { name: 'Warning Data', value: 'Semua data peringatan telah direset', inline: true },
-                        { name: 'Dibuat oleh', value: interaction.user.tag, inline: false }
-                    )
-                    .setFooter({ text: 'Tag admin tidak akan mendapat peringatan' })
-                    .setTimestamp();
-                
-                await interaction.reply({ embeds: [embed], ephemeral: true });
-                console.log(`🛡️ Anti-tag feature DISABLED by ${interaction.user.tag}`);
-                
-                // Kirim pesan status ke COMMAND_CHANNEL_ID
-                try {
-                    const commandChannel = client.channels.cache.get(COMMAND_CHANNEL_ID);
-                    if (commandChannel) {
-                        await commandChannel.send({
-                            content: `🛡️ **Status Anti-Tag:** **NON-AKTIF**\nFitur anti-tag admin telah dimatikan oleh ${interaction.user.tag}`
-                        });
-                    }
-                } catch (error) {
-                    console.error('Gagal kirim status anti-tag:', error);
-                }
-            }
-        }
-    }
-    
-    // ===== COMMAND: /help =====
-    else if (commandName === 'help') {
-        const embed = new EmbedBuilder()
-            .setColor(0x7289DA)
-            .setTitle('🆘 Bantuan - GrowLauncher Bot')
-            .setDescription('**Daftar command yang tersedia:**')
-            .addFields(
-                { 
-                    name: '🎮 **User Commands**', 
-                    value: '```\n/gl - Dapatkan link download GrowLauncher\n/help - Tampilkan bantuan ini\n```' 
-                },
-                { 
-                    name: '👑 **Admin Commands**', 
-                    value: '```\n/admin setlink [link] - Update link GL\n/admin antitag [on/off] - Toggle anti-tag feature\n```' 
-                }
-            )
-            .addFields(
-                { 
-                    name: '📌 **Channel Rules**', 
-                    value: `• **/gl** hanya di <#${GL_CHANNEL_ID}>\n• Jangan share link di channel lain` 
-                }
-            )
-            .setFooter({ text: `Bot ini dibuat oleh user @mi._chel  • ${client.user.tag}` })
-            .setTimestamp();
-        
-        await interaction.reply({ embeds: [embed], ephemeral: true });
-    }
-});
+// ===== INTERACTION HANDLER =====
+botClient.on('interactionCreate', async interaction => {
+    // BUTTON HANDLER
+    if (interaction.isButton()) {
+        const { customId } = interaction;
 
-// ===== FITUR ANTI TAG ADMIN =====
-client.on('messageCreate', async message => {
-    if (message.author.bot) return;
-    
-    // ===== STICKY NOTE LOGIC =====
-    // Jika ada pesan baru di channel sticky, update sticky note
-    if (message.channel.id === STICKY_CHANNEL_ID) {
-        // Skip jika pesan adalah slash command
-        if (message.content.startsWith('/')) return;
-        
-        console.log(`📌 New message from ${message.author.tag} in sticky channel`);
-        
-        // Gunakan debounce untuk mencegah spam update
-        if (stickyUpdateTimeout) {
-            clearTimeout(stickyUpdateTimeout);
+        if (checkCommandSpam(interaction.user.id)) {
+            return interaction.reply({ 
+                content: `⛔ Anda diblokir sementara karena spam. Coba lagi dalam ${BLOCK_DURATION/1000} detik.`,
+                flags: 64
+            });
         }
-        
-        // Delay 2 detik sebelum update (memberi waktu jika ada multiple messages)
-        stickyUpdateTimeout = setTimeout(async () => {
-            try {
-                console.log(`📌 Updating sticky note...`);
-                await postStickyMessage();
-            } catch (error) {
-                console.error('Error updating sticky note:', error);
-            }
-            stickyUpdateTimeout = null;
-        }, 2000); // Delay 2 detik
-        
-        // STOP di sini - jangan lanjut ke anti-tag logic untuk pesan di sticky channel
-        return;
-    }
-    
-    // ===== ANTI TAG LOGIC =====
-    // Skip jika fitur anti-tag tidak aktif
-    if (!antiTagEnabled) return;
-    
-    // Skip jika pengirim adalah admin
-    if (isAdmin(message.member)) return;
-    
-    // Cek apakah pesan mengandung tag/mention
-    if (message.mentions.users.size > 0) {
-        // Cek apakah ada admin yang di-tag
-        const mentionedAdmins = message.mentions.members.filter(member => 
-            hasAdminRole(member)
-        );
-        
-        if (mentionedAdmins.size > 0) {
-            const userId = message.author.id;
-            const now = Date.now();
-            const FIVE_MINUTES = 5 * 60 * 1000; // 5 menit dalam milidetik
-            
-            // Dapatkan atau buat data warning untuk user
-            let userWarnings = tagWarnings.get(userId);
-            if (!userWarnings) {
-                userWarnings = { count: 0, lastWarning: 0 };
-                tagWarnings.set(userId, userWarnings);
-            }
-            
-            // Reset count jika lebih dari 5 menit dari warning terakhir
-            if (now - userWarnings.lastWarning > FIVE_MINUTES) {
-                userWarnings.count = 0;
-            }
-            
-            // Tambah warning count
-            userWarnings.count++;
-            userWarnings.lastWarning = now;
-            
-            console.log(`⚠️ ${message.author.tag} tagged admin. Warning: ${userWarnings.count}/${MAX_WARNINGS}`);
-            
-            // Kirim peringatan
-            const warningEmbed = new EmbedBuilder()
-                .setColor(userWarnings.count >= MAX_WARNINGS ? 0xFF0000 : 0xFFA500)
-                .setTitle('⚠️ Jangan Tag Admin!')
-                .setDescription(`<@${userId}> jangan tag admin, sabar!`)
-                .addFields(
-                    { name: 'Peringatan', value: `${userWarnings.count}/${MAX_WARNINGS}`, inline: true },
-                    { name: 'Aksi', value: userWarnings.count >= MAX_WARNINGS ? '⏳ MUTE 10 detik' : '⚠️ Warning', inline: true }
-                )
-                .setFooter({ text: `Fitur anti-tag ${antiTagEnabled ? 'AKTIF' : 'NON-AKTIF'}` })
-                .setTimestamp();
-            
-            // Kirim warning (TIDAK hapus pesan asli)
-            try {
-                await message.channel.send({ 
-                    content: `<@${userId}>`, 
-                    embeds: [warningEmbed] 
-                });
-                
-            } catch (error) {
-                console.error('Error handling tag warning:', error);
-            }
-            
-            // Jika sudah mencapai batas maksimal, mute user
-            if (userWarnings.count >= MAX_WARNINGS) {
-                // Reset count untuk user ini
-                tagWarnings.delete(userId);
-                
-                // Mute user
-                await muteMember(message.member, MUTE_DURATION);
-                
-                // Kirim notifikasi mute
-                const muteEmbed = new EmbedBuilder()
-                    .setColor(0xFF0000)
-                    .setTitle('🔇 User Di-Mute!')
-                    .setDescription(`<@${userId}> telah di-mute selama ${MUTE_DURATION} detik`)
-                    .addFields(
-                        { name: 'Alasan', value: 'Terlalu banyak tag admin', inline: true },
-                        { name: 'Durasi', value: `${MUTE_DURATION} detik`, inline: true },
-                        { name: 'Peringatan', value: `Sudah ${MAX_WARNINGS}x peringatan`, inline: true }
-                    )
-                    .setTimestamp();
-                
-                await message.channel.send({ embeds: [muteEmbed] });
-                
-                console.log(`🔇 Muted ${message.author.tag} for ${MUTE_DURATION} seconds`);
-            }
-        }
-    }
-});
 
-// ===== HANDLER STICKY NOTE JIKA DIHAPUS =====
-client.on('messageDelete', async (message) => {
-    // Cek jika pesan yang dihapus adalah sticky note
-    if (message.channel.id === STICKY_CHANNEL_ID && message.id === stickyMessageId) {
-        // Skip jika bot yang menghapus (saat update)
-        if (isBotDeletingSticky) {
-            console.log('📌 Sticky note deleted by bot (during update), skipping repost');
+        if (customId === 'status_check_commands') {
+            const embed = await createCheckCommandsEmbed(interaction.user.tag);
+            await interaction.reply({ embeds: [embed], flags: 64 });
             return;
         }
-        
-        console.log('📌 Sticky note was deleted by user, waiting 5 seconds...');
-        
-        // Clear existing timeout jika ada
-        if (stickyUpdateTimeout) {
-            clearTimeout(stickyUpdateTimeout);
+
+        if (customId === 'bothax_android') {
+            const embed = new EmbedBuilder()
+                .setColor(0x9B59B6)
+                .setTitle('📱 Bothax Android')
+                .setDescription('Download link for Bothax Android version')
+                .addFields(
+                    { name: '📥 Download Link', value: '[BINTERNAL v5.42 APK](https://www.mediafire.com/file/mgzdc7byop7xo64/B%2527INTERNAL_v5.42_r2_%2528key_system%2529.dll/file)', inline: false },
+                    { name: '🔄 Version', value: '5.42', inline: true },
+                    { name: '📱 Platform', value: 'Android', inline: true },
+                    { name: '🔑 Key Required', value: 'key: updating', inline: false }
+                )
+                .setFooter(await getGeneralFooter())
+                .setTimestamp();
+            await interaction.reply({ embeds: [embed], flags: 64 });
+        } 
+        else if (customId === 'bothax_windows') {
+            const embed = new EmbedBuilder()
+                .setColor(0x9B59B6)
+                .setTitle('💻 Bothax Windows')
+                .setDescription('Download link for Bothax Windows version\n**Don\'t forget to download the Loader!**')
+                .addFields(
+                    { name: '📥 Download Link', value: '[BINTERNAL v5.42 DLL](https://www.mediafire.com/file/mgzdc7byop7xo64/B_INTERNAL_v5.42_r2_%2528key_system%2529.dll/file)', inline: false },
+                    { name: '🔄 Version', value: '5.42', inline: true },
+                    { name: '💻 Platform', value: 'Windows', inline: true },
+                    { name: '⚠️ Reminder', value: 'You need Loader to use this! Use `/loader`', inline: false },
+                    { name: '🔑 Key Required', value: 'key: updating', inline: false }
+                )
+                .setFooter(await getGeneralFooter())
+                .setTimestamp();
+            await interaction.reply({ embeds: [embed], flags: 64 });
         }
-        
-        // Delay 5 detik sebelum repost
-        stickyUpdateTimeout = setTimeout(() => {
-            console.log('📌 Reposting sticky note after user deletion...');
-            postStickyMessage();
-            stickyUpdateTimeout = null;
-        }, 5000);
+        else if (customId === 'genta_android') {
+            const embed = new EmbedBuilder()
+                .setColor(0xE74C3C)
+                .setTitle('📱 Genta Hax Android')
+                .setDescription('Download link for Genta Hax Android version')
+                .addFields(
+                    { name: '📥 Download Link', value: '[GENTAHAX v5.42 APK](https://www.mediafire.com/file/mfz9lbwxwuqypfe/GENTAHAX_v5.42_-_Patch_2.0_UNIVERSAL.apk/file)', inline: false },
+                    { name: '🔄 Version', value: '5.42', inline: true },
+                    { name: '📱 Platform', value: 'Android', inline: true },
+                    { name: '✨ Features', value: 'Patch 2.0 UNIVERSAL', inline: true },
+                    { name: '🔑 Key Required', value: 'You need a key to use this! Buy key at <#1468312617071415418>', inline: false }
+                )
+                .setFooter(await getGeneralFooter())
+                .setTimestamp();
+            await interaction.reply({ embeds: [embed], flags: 64 });
+        }
+        else if (customId === 'genta_windows') {
+            const embed = new EmbedBuilder()
+                .setColor(0xE74C3C)
+                .setTitle('💻 Genta Hax Windows')
+                .setDescription('Download link for Genta Hax Windows version\n**Don\'t forget to download the Loader!**')
+                .addFields(
+                    { name: '📥 Download Link', value: '[GENTAHAX v5.42 DLL](https://www.mediafire.com/file/jo1cwehahofsr8a/GENTAHAX_-_GTInternal.dll/file)', inline: false },
+                    { name: '🔄 Version', value: '5.42', inline: true },
+                    { name: '💻 Platform', value: 'Windows', inline: true },
+                    { name: '⚠️ Reminder', value: 'You need Loader to use this! Use `/loader`', inline: false },
+                    { name: '🔑 Key Required', value: 'You need a key to use this! Buy key at <#1468312617071415418>', inline: false }
+                )
+                .setFooter(await getGeneralFooter())
+                .setTimestamp();
+            await interaction.reply({ embeds: [embed], flags: 64 });
+        }
+        return;
+    }
+
+    // COMMAND HANDLER
+    if (!interaction.isCommand()) return;
+
+    const { commandName, options, channel, member, user } = interaction;
+
+    if (!user || !member) return;
+
+    if (isUserBlocked(user.id)) {
+        const blockData = blockedUsers.get(user.id);
+        const timeLeft = Math.ceil((blockData.blockUntil - Date.now()) / 1000);
+
+        const embed = new EmbedBuilder()
+            .setColor(0xFF0000)
+            .setTitle('⛔ Anda Diblokir Sementara')
+            .setDescription(`Anda tidak dapat menggunakan command untuk sementara waktu.`)
+            .addFields(
+                { name: 'Alasan', value: blockData.reason, inline: false },
+                { name: 'Sisa Waktu', value: `${timeLeft} detik`, inline: true },
+                { name: 'Diblokir Pada', value: new Date(blockData.blockedAt).toLocaleTimeString('id-ID'), inline: true }
+            )
+            .setFooter(await getFooterWithAvatar(user.tag))
+            .setTimestamp();
+
+        return interaction.reply({ embeds: [embed], flags: 64 });
+    }
+
+    if (checkCommandSpam(user.id)) {
+        return interaction.reply({ 
+            content: `⛔ Terlalu banyak command dalam waktu singkat. Tunggu ${BLOCK_DURATION/1000} detik.`,
+            flags: 64
+        });
+    }
+
+    commandCount++;
+
+    // ===== HELP COMMAND =====
+    if (commandName === 'help') {
+        const isUserAdmin = isAdmin(member);
+        const embed = await createCheckCommandsEmbed(user.tag);
+        await interaction.reply({ embeds: [embed], ephemeral: !isUserAdmin });
+    }
+
+    // ===== GL COMMAND =====
+    else if (commandName === 'gl') {
+        if (!checkChannel(interaction, GL_CHANNEL_ID, 'gl')) return;
+        const embed = new EmbedBuilder()
+            .setColor(0x00FF00)
+            .setTitle('🎮 GrowLauncher 5.39')
+            .setDescription('**Latest GrowLauncher download link:**')
+            .addFields(
+                { name: '📥 Direct Download', value: `[Download Here](${GL_LINK})`, inline: true },
+                { name: '🔄 Version', value: '5.39 (can spoof to 5.41)', inline: true }
+            )
+            .setFooter(await getFooterWithAvatar(user.tag))
+            .setTimestamp();
+        await interaction.reply({ embeds: [embed] });
+    }
+
+    // ===== AUTOREPLY COMMANDS =====
+    else if (commandName === 'autoreply1') {
+        if (user.id !== SPECIAL_USER_ID) {
+            return interaction.reply({ 
+                content: '❌ Hanya <@914818330022535209> yang dapat menggunakan command ini!',
+                ephemeral: true
+            });
+        }
+        const status = options.getString('status');
+        const oldStatus = autoReplyUser1;
+        autoReplyUser1 = (status === 'on');
+        const embed = new EmbedBuilder()
+            .setColor(status === 'on' ? 0x00FF00 : 0xFFFF00)
+            .setTitle('⚙️ Auto-Reply User 1')
+            .setDescription(`Auto-reply untuk <@${SPECIAL_USER_ID}> telah **${status === 'on' ? 'DIAKTIFKAN' : 'DINONAKTIFKAN'}**`)
+            .addFields(
+                { name: '👤 Diubah Oleh', value: `<@${user.id}> (${user.tag})`, inline: true },
+                { name: '🎯 Target User', value: `<@${SPECIAL_USER_ID}>`, inline: true },
+                { name: '🔧 Status', value: status === 'on' ? '🟢 **AKTIF**' : '🟡 **NONAKTIF**', inline: true },
+                { name: '📊 Status Sebelumnya', value: oldStatus ? '🟢 AKTIF' : '🟡 NONAKTIF', inline: true }
+            )
+            .setFooter(await getGeneralFooter())
+            .setTimestamp();
+        await interaction.reply({ embeds: [embed] });
+    }
+
+    else if (commandName === 'autoreply2') {
+        if (user.id !== BOT_CREATOR_ID) {
+            return interaction.reply({ 
+                content: '❌ Hanya <@929200608190300212> yang dapat menggunakan command ini!',
+                ephemeral: true
+            });
+        }
+        const status = options.getString('status');
+        const oldStatus = autoReplyUser2;
+        autoReplyUser2 = (status === 'on');
+        const embed = new EmbedBuilder()
+            .setColor(status === 'on' ? 0x00FF00 : 0xFFFF00)
+            .setTitle('⚙️ Auto-Reply User 2')
+            .setDescription(`Auto-reply untuk <@${BOT_CREATOR_ID}> telah **${status === 'on' ? 'DIAKTIFKAN' : 'DINONAKTIFKAN'}**`)
+            .addFields(
+                { name: '👤 Diubah Oleh', value: `<@${user.id}> (${user.tag})`, inline: true },
+                { name: '🎯 Target User', value: `<@${BOT_CREATOR_ID}>`, inline: true },
+                { name: '🔧 Status', value: status === 'on' ? '🟢 **AKTIF**' : '🟡 **NONAKTIF**', inline: true },
+                { name: '📊 Status Sebelumnya', value: oldStatus ? '🟢 AKTIF' : '🟡 NONAKTIF', inline: true }
+            )
+            .setFooter(await getGeneralFooter())
+            .setTimestamp();
+        await interaction.reply({ embeds: [embed] });
+    }
+
+    // ===== DOCUMENTATION COMMANDS =====
+    else if (commandName === 'docsgpai') {
+        const embed = new EmbedBuilder()
+            .setColor(0x3498DB)
+            .setTitle('📚 GrowPai Lua Documentation')
+            .setDescription('Official documentation for GrowPai Lua scripting')
+            .addFields(
+                { name: '📖 GitHub Repository', value: 'https://github.com/0x0FFFF/luadocs-me/blob/main/LuaDocs.md', inline: false }
+            )
+            .setFooter(await getFooterWithAvatar(user.tag))
+            .setTimestamp();
+        await interaction.reply({ embeds: [embed] });
+    }
+
+    else if (commandName === 'docsbhax') {
+        const embed = new EmbedBuilder()
+            .setColor(0x9B59B6)
+            .setTitle('📚 Bothax Documentation')
+            .setDescription('Official documentation for Bothax')
+            .addFields(
+                { name: '📖 GitHub Repository', value: 'https://github.com/dravenox/bothax', inline: false }
+            )
+            .setFooter(await getFooterWithAvatar(user.tag))
+            .setTimestamp();
+        await interaction.reply({ embeds: [embed] });
+    }
+
+    else if (commandName === 'docsgenta') {
+        const embed = new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('📚 Genta Hax Documentation')
+            .setDescription('Official documentation for Genta Hax')
+            .addFields(
+                { name: '📖 GitHub Repository', value: 'https://github.com/GENTA7740/GENTA-HAX-DOCS', inline: false }
+            )
+            .setFooter(await getFooterWithAvatar(user.tag))
+            .setTimestamp();
+        await interaction.reply({ embeds: [embed] });
+    }
+
+    else if (commandName === 'docsgl') {
+        const embed = new EmbedBuilder()
+            .setColor(0x2ECC71)
+            .setTitle('📚 GrowLauncher Documentation')
+            .setDescription('Official documentation for GrowLauncher')
+            .addFields(
+                { name: '📖 GitHub Repository', value: 'https://github.com/IniEyyy/Growlauncher-Documentation', inline: false }
+            )
+            .setFooter(await getFooterWithAvatar(user.tag))
+            .setTimestamp();
+        await interaction.reply({ embeds: [embed] });
+    }
+
+    // ===== DOWNLOAD COMMANDS =====
+    else if (commandName === 'growpai') {
+        const embed = new EmbedBuilder()
+            .setColor(0xF1C40F)
+            .setTitle('🎮 GrowPai Download')
+            .setDescription('Download the latest version of GrowPai')
+            .addFields(
+                { name: '📥 Direct Download', value: '[Download GrowPai](https://cdn.growpai.site/growpai/Growpai_5.42_02042026.zip)', inline: false },
+                { name: '🔄 Version', value: '5.42', inline: true },
+                { name: '📅 Updated', value: '02/04/2026', inline: true }
+            )
+            .setFooter(await getFooterWithAvatar(user.tag))
+            .setTimestamp();
+        await interaction.reply({ embeds: [embed] });
+    }
+
+    else if (commandName === 'bothax') {
+        if (!checkChannel(interaction, GL_CHANNEL_ID, 'bothax')) return;
+        const row = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId('bothax_android')
+                    .setLabel('Android APK')
+                    .setStyle(ButtonStyle.Primary),
+                new ButtonBuilder()
+                    .setCustomId('bothax_windows')
+                    .setLabel('Windows DLL')
+                    .setStyle(ButtonStyle.Success)
+            );
+        const embed = new EmbedBuilder()
+            .setColor(0x9B59B6)
+            .setTitle('🎮 Bothax Download')
+            .setDescription('Choose your platform to download Bothax')
+            .addFields(
+                { name: '📱 Android', value: 'BINTERNAL v5.42 APK', inline: true },
+                { name: '💻 Windows', value: 'BINTERNAL v5.42 DLL', inline: true },
+                { name: '🔄 Version', value: '5.42', inline: true },
+                { name: '⚠️ Important', value: 'You need a key to use this! Buy key at <#1468312617071415418>', inline: false }
+            )
+            .setFooter(await getGeneralFooter())
+            .setTimestamp();
+        await interaction.reply({ embeds: [embed], components: [row] });
+    }
+
+    else if (commandName === 'genta') {
+        if (!checkChannel(interaction, GL_CHANNEL_ID, 'genta')) return;
+        const row = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId('genta_android')
+                    .setLabel('Android APK')
+                    .setStyle(ButtonStyle.Primary),
+                new ButtonBuilder()
+                    .setCustomId('genta_windows')
+                    .setLabel('Windows DLL')
+                    .setStyle(ButtonStyle.Success)
+            );
+        const embed = new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('🎮 Genta Hax Download')
+            .setDescription('Choose your platform to download Genta Hax')
+            .addFields(
+                { name: '📱 Android', value: 'GENTAHAX v5.42 Universal APK', inline: true },
+                { name: '💻 Windows', value: 'GENTAHAX v5.42 DLL', inline: true },
+                { name: '🔄 Version', value: '5.42', inline: true },
+                { name: '⚠️ Important', value: 'You need a key to use this! Buy key at <#1468312617071415418>', inline: false }
+            )
+            .setFooter(await getGeneralFooter())
+            .setTimestamp();
+        await interaction.reply({ embeds: [embed], components: [row] });
+    }
+
+    else if (commandName === 'loader') {
+        if (!checkChannel(interaction, GL_CHANNEL_ID, 'loader')) return;
+        const embed = new EmbedBuilder()
+            .setColor(0x3498DB)
+            .setTitle('⚙️ Loader for Windows Injector')
+            .setDescription('**IMPORTANT:** You need this loader to use Windows injectors (Bothax/Genta Hax)')
+            .addFields(
+                { name: '📥 Download Link', value: '[Download Loader v4](https://cdn.discordapp.com/attachments/1076792846780203088/1396047324848853103/Loader_v4.exe?ex=6985a763&is=698455e3&hm=881cecee315865179d66f740695b4ea887acf59eb527f34247a39126f0bcc16f&)', inline: false },
+                { name: 'ℹ️ Usage', value: 'Required for Bothax/Genta Hax Windows version', inline: true },
+                { name: '🔧 Version', value: 'v4', inline: true },
+                { name: '⚠️ Reminder', value: 'You still need a key for Bothax/Genta Hax! Buy key at <#1468312617071415418>', inline: false }
+            )
+            .setFooter(await getFooterWithAvatar(user.tag))
+            .setTimestamp();
+        await interaction.reply({ embeds: [embed] });
+    }
+
+    // ===== BROADCAST COMMAND =====
+    else if (commandName === 'broadcast') {
+        if (!isAdmin(member)) {
+            return interaction.reply({ 
+                content: '❌ Hanya admin yang dapat menggunakan command ini!',
+                ephemeral: true
+            });
+        }
+        const channel = options.getChannel('channel');
+        const messageContent = options.getString('message');
+        const useEmbed = options.getBoolean('embed') || false;
+        try {
+            if (useEmbed) {
+                const footerData = await getGeneralFooter();
+                const embed = new EmbedBuilder()
+                    .setColor(0x3498DB)
+                    .setTitle('📢 Broadcast Message')
+                    .setDescription(messageContent)
+                    .setFooter({ 
+                         text: footerData.text || 'Bot by @mi._chel',
+                        iconURL: user.displayAvatarURL({ extension: 'png', size: 64 })
+                    })
+                    .setTimestamp();
+                await channel.send({ embeds: [embed] });
+            } else {
+                await channel.send(messageContent);
+            }
+            const confirmEmbed = new EmbedBuilder()
+                .setColor(0x00FF00)
+                .setTitle('✅ Broadcast Berhasil')
+                .setDescription(`Pesan telah dikirim ke ${channel}`)
+                .addFields(
+                    { name: '👤 Pengirim', value: `${user.tag}`, inline: true },
+                    { name: '📝 Metode', value: useEmbed ? 'Embed' : 'Text', inline: true },
+                    { name: '📊 Panjang Pesan', value: `${messageContent.length} karakter`, inline: true }
+                )
+                .setFooter({ text: 'Bot by @mi._chel' })
+                .setTimestamp();
+            await interaction.reply({ embeds: [confirmEmbed] });
+        } catch (error) {
+            const errorEmbed = new EmbedBuilder()
+                .setColor(0xFF0000)
+                .setTitle('❌ Broadcast Gagal')
+                .setDescription(`Gagal mengirim pesan ke ${channel}`)
+                .addFields(
+                    { name: 'Error', value: error.message.substring(0, 100), inline: false }
+                )
+                .setFooter({ text: 'Bot by @mi._chel' })
+                .setTimestamp();
+            await interaction.reply({ embeds: [errorEmbed], flags: 64 });
+        }
     }
 });
 
-// Error handling
-client.on('error', error => console.error('Client error:', error));
-client.on('warn', warning => console.warn('Client warning:', warning));
+// ===== MESSAGE HANDLER =====
+botClient.on('messageCreate', async message => {
+    if (message.author.bot) return;
 
-// Graceful shutdown
-process.on('SIGINT', () => {
-    console.log('\n🔄 Shutting down bot...');
-    console.log(`Status anti-tag: ${antiTagEnabled ? 'ON' : 'OFF'}`);
-    console.log(`Total warnings tracked: ${tagWarnings.size}`);
-    console.log(`Sticky message ID: ${stickyMessageId}`);
-    client.destroy();
+    // AUTO DELETE DI CHANNEL SCRIPT
+    if (message.channel.id === SCRIPT_CHANNEL_ID) {
+        if (message.interaction || message.type === 20) return;
+
+        if (message.reference && message.reference.messageId) {
+            try {
+                const repliedMessage = await message.channel.messages.fetch(message.reference.messageId);
+                if (repliedMessage.interaction) return;
+            } catch (error) {}
+        }
+
+        try {
+            await message.delete();
+        } catch (error) {}
+        return;
+    }
+
+    // AUTO-REPLY SYSTEM
+    const isBotMentioned = message.mentions.has(botClient.user.id);
+    const isReplyToBot = message.reference && message.reference.messageId;
+
+    if (isBotMentioned || isReplyToBot) {
+        if (isReplyToBot) {
+            try {
+                const repliedMessage = await message.channel.messages.fetch(message.reference.messageId);
+                if (repliedMessage.author.id !== botClient.user.id) {
+                    return;
+                }
+            } catch (error) {
+                return;
+            }
+        }
+
+        const animeReply = getAnimeAutoReply();
+        try {
+            await message.reply({
+                content: `${animeReply}`,
+                allowedMentions: { repliedUser: true }
+            });
+        } catch (error) {
+            await message.channel.send({
+                content: `<@${message.author.id}>, ${animeReply}`
+            });
+        }
+        return;
+    }
+
+    if (autoReplyUser1 && message.mentions.has(SPECIAL_USER_ID)) {
+        if (!isRegularMember(message.member)) return;
+        const userId = message.author.id;
+        if (canReplyToUser1(userId)) {
+            const autoReplyMessage = getUser1AutoReply();
+            try {
+                await message.reply({
+                    content: `${autoReplyMessage}`,
+                    allowedMentions: { repliedUser: true }
+                });
+            } catch (error) {
+                await message.channel.send({
+                    content: `<@${userId}>, ${autoReplyMessage}`
+                });
+            }
+        }
+        return;
+    }
+
+    if (autoReplyUser2 && message.mentions.has(BOT_CREATOR_ID)) {
+        if (message.reference) return;
+        await handleUser2Tag(message);
+        return;
+    }
+});
+
+// ===== MEMBER JOIN HANDLER =====
+botClient.on('guildMemberAdd', async (member) => {
+    const statusChannel = botClient.channels.cache.get(STATUS_CHANNEL_ID);
+    if (!statusChannel) return;
+    const message = await statusChannel.send({
+        content: `<@${member.id}>`
+    });
+    setTimeout(() => {
+        message.delete().catch(() => {});
+    }, 500);
+});
+
+// ===== AUTO-LEAVE SERVER =====
+const ALLOWED_GUILDS = ['1413397334578171917'];
+
+botClient.on('guildCreate', async (guild) => {
+    if (!ALLOWED_GUILDS.includes(guild.id)) {
+        guild.leave().catch(() => {});
+    }
+});
+
+// ===== USER CLIENT EVENTS =====
+userClient.once('ready', () => {
+    console.log(`👤 User client ${userClient.user.tag} is online!`);
+    userClient.user.setPresence({
+        status: 'idle',
+        activities: []
+    });
+});
+
+userClient.on('messageCreate', async (message) => {
+    if (message.author.bot) return;
+});
+
+userClient.on('error', (error) => {
+    console.error('❌ User client error:', error);
+});
+
+userClient.on('warn', (warning) => {
+    console.warn('⚠️ User client warning:', warning);
+});
+
+// ===== ERROR HANDLING =====
+botClient.on('error', error => {
+    console.error('❌ Bot client error:', error);
+});
+
+botClient.on('warn', warning => {
+    console.warn('⚠️ Bot client warning:', warning);
+});
+
+process.on('SIGINT', async () => {
+    console.log('\n🛑 Shutting down bot...');
+    const channel = botClient.channels.cache.get(STATUS_CHANNEL_ID);
+    if (channel && statusMessageId) {
+        try {
+            const creator = await botClient.users.fetch(BOT_CREATOR_ID);
+            const embed = new EmbedBuilder()
+                .setColor(0xFF0000)
+                .setTitle('🤖 Michelle Bot Status')
+                .setDescription('**Bot is currently OFFLINE**')
+                .addFields(
+                    { name: '🔄 Status', value: '🔴 **OFFLINE**', inline: true },
+                    { name: '📊 Final Command Count', value: `**${lastCommandCount}** commands`, inline: true },
+                    { name: '⏰ Last Online', value: formatDateWIB(), inline: false },
+                    { name: '⏱️ Total Uptime', value: formatUptime(), inline: true }
+                )
+                .setFooter({ 
+                    text: `Bot by ${creator.tag} • Last updated`,
+                    iconURL: creator.displayAvatarURL({ extension: 'png', size: 64 })
+                })
+                .setTimestamp();
+            const message = await channel.messages.fetch(statusMessageId);
+            await message.edit({ 
+                embeds: [embed],
+                components: []
+            });
+        } catch (error) {}
+    }
+    botClient.destroy();
     process.exit(0);
 });
 
-// Login
+// ===== LOGIN =====
 console.log('🔐 Connecting to Discord...');
-client.login(TOKEN).catch(error => {
-    console.error('❌ Login failed:', error.message);
-    process.exit(1);
-});
 
-// Listen to PORT for Heroku
-client.once('ready', () => {
-    if (PORT) {
-        const http = require('http');
-        const server = http.createServer((req, res) => {
-            res.writeHead(200, { 'Content-Type': 'text/plain' });
-            res.end('Bot is running!');
-        });
-        server.listen(PORT, () => {
-            console.log(`🌐 HTTP server listening on port ${PORT}`);
-        });
-    }
+botClient.login(TOKEN).catch(error => {
+    console.error('❌ Failed to login bot client:', error);
+    process.exit(1);
 });
